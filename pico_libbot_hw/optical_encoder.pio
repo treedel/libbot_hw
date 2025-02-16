@@ -1,0 +1,82 @@
+.program optical_encoder
+
+MOV ISR, null
+PUSH noblock
+start:
+    // Wait for falling edge
+    WAIT 1 pin 0
+    wait 0 pin 0
+    
+    // Detect direction and perform action
+    PULL noblock
+    MOV X, OSR
+    JMP !X, increment
+    JMP decrement
+
+// Negate -> decrement -> negate to increment
+// Jumping to update for pushing count into fifo
+increment:
+    MOV Y, ~Y
+    JMP Y--, increment_cont
+increment_cont:
+    MOV Y, ~Y
+    JMP update
+
+// Decrement
+// Updating for pushing count into fifo
+decrement:
+    JMP Y--, update
+update:
+    MOV ISR, Y
+    PUSH noblock
+    jmp start
+
+% c-sdk {
+    #include "hardware/clocks.h"
+    #include "hardware/gpio.h"
+
+    static inline void encoder_init(PIO pio, uint sm, uint offset, uint pin, int max_step_rate) {
+
+        // Set the GPIOs as inputs
+        pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+        pio_gpio_init(pio, pin);
+        gpio_pull_up(pin);
+
+        // Load program and configure the state machine
+        pio_sm_config c = pio_get_default_sm_config();
+        sm_config_set_in_pins(&c, pin);
+        sm_config_set_jmp_pin(&c, pin);
+        sm_config_set_in_shift(&c, false, false, 32);
+        sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_NONE);
+
+        // passing "0" as the sample frequency,
+        if (max_step_rate == 0) {
+            sm_config_set_clkdiv(&c, 1.0);
+        }
+        else {
+            // one state machine loop takes at most 11 cycles
+            float div = (float)clock_get_hz(clk_sys) / (11 * max_step_rate);
+            sm_config_set_clkdiv(&c, div);
+        }
+        
+        pio_sm_init(pio, sm, offset, &c);
+        pio_sm_set_enabled(pio, sm, true);
+    }
+
+    static inline bool encoder_get_count(PIO pio, uint sm, int32_t* count) {
+        // No data available condition
+        if (pio_sm_is_rx_fifo_empty(pio, sm)) {
+            return false;
+        }
+
+        int32_t latest_count = 0;
+        // Drain FIFO and store only the last value
+        while (!pio_sm_is_rx_fifo_empty(pio, sm)) {
+            latest_count = pio_sm_get(pio, sm);
+        }
+
+        *count = latest_count;
+        return true;
+    }
+
+%}
